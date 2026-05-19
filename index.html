@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>AR 空間羅盤 V9 (觀眾互動版)</title>
+  <style>
+    body { margin: 0; overflow: hidden; background-color: #000; font-family: sans-serif; touch-action: none; }
+    
+    #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 100; pointer-events: none; }
+    
+    /* 1. 魔術師專用熱區：右上角 100x100 的隱形按鈕 */
+    #magician-zone {
+      position: absolute; top: 0; right: 0; width: 100px; height: 100px;
+      z-index: 200; pointer-events: auto;
+      /* background: rgba(255,0,0,0.3); 打開這行可以看見熱區方便練習，實戰請註解掉 */
+    }
+
+    /* 2. 觀眾觸發熱區：螢幕正中央 150x150 的隱形按鈕 (包覆指針) */
+    #spectator-zone {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 150px; height: 150px; border-radius: 50%;
+      z-index: 200; pointer-events: auto;
+      /* background: rgba(0,255,0,0.3); 打開這行可以看見熱區方便練習，實戰請註解掉 */
+    }
+
+    /* 給魔術師瞄準用的超淡十字星 */
+    #crosshair {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      width: 20px; height: 20px; opacity: 0.15; pointer-events: none; transition: opacity 0.3s;
+    }
+    #crosshair::before, #crosshair::after { content: ''; position: absolute; background: white; }
+    #crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
+    #crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
+  </style>
+
+  <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  
+  <div id="overlay">
+    <div id="crosshair"></div>
+  </div>
+
+  <div id="magician-zone"></div>
+  <div id="spectator-zone"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+    let camera, scene, renderer, pointer;
+    let targetPoint = new THREE.Vector3();
+    let crosshair = document.getElementById('crosshair');
+    
+    // 狀態機：0 = 待命掃描, 1 = 已暗中鎖定(指針仍轉), 2 = 觀眾觸發(鎖定目標)
+    let appState = 0; 
+
+    init();
+
+    function init() {
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      // 小指針設計
+      const shape = new THREE.Shape();
+      shape.moveTo(0, 0.04); shape.lineTo(0.0075, 0); shape.lineTo(0.0025, 0); shape.lineTo(0.0025, -0.03); shape.lineTo(-0.0025, -0.03); shape.lineTo(-0.0025, 0); shape.lineTo(-0.0075, 0); shape.closePath();
+      const pointerGeo = new THREE.ShapeGeometry(shape);
+      const pointerMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+      pointer = new THREE.Mesh(pointerGeo, pointerMat);
+      pointer.position.set(0, 0, -0.3); 
+      camera.add(pointer);
+      scene.add(camera);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      document.body.appendChild(ARButton.createButton(renderer, {
+        optionalFeatures: ['dom-overlay'],
+        domOverlay: { root: document.body }
+      }));
+
+      // ==========================================
+      // 1. 魔術師操作區 (右上角)
+      // ==========================================
+      document.getElementById('magician-zone').addEventListener('pointerdown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+
+        if (appState === 0) {
+          // 狀態 0 -> 1：暗中鎖定前方 20 公分處
+          targetPoint.set(0, 0, -0.2);
+          camera.localToWorld(targetPoint); 
+          
+          appState = 1;
+          crosshair.style.opacity = '0'; // 隱藏準星，畫面變乾淨準備給觀眾
+
+          if(navigator.vibrate) navigator.vibrate(50); // 魔術師的短震回饋
+        } 
+        else if (appState === 2) {
+          // 狀態 2 -> 0：表演結束，魔術師點右上角重置，準備下一次表演
+          appState = 0;
+          crosshair.style.opacity = '0.15'; // 恢復準星
+          
+          if(navigator.vibrate) navigator.vibrate([30, 30, 30]); // 魔術師的重置震動回饋
+        }
+      });
+
+      // ==========================================
+      // 2. 觀眾操作區 (正中央指針處)
+      // ==========================================
+      document.getElementById('spectator-zone').addEventListener('pointerdown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+
+        // 只有在魔術師已經「暗中鎖定 (狀態1)」的情況下，觀眾點擊才有反應
+        if (appState === 1) {
+          appState = 2; // 進入追蹤狀態
+          
+          if(navigator.vibrate) navigator.vibrate(100); // 給觀眾的強烈震動回饋，感覺像是啟動了什麼
+        }
+      });
+
+      renderer.setAnimationLoop(render);
+    }
+
+    function render(timestamp, frame) {
+      if (frame) {
+        if (appState === 0 || appState === 1) {
+          // 狀態 0 與 1 時，指針都維持假裝掃描的旋轉
+          pointer.rotation.z -= 0.05;
+        } 
+        else if (appState === 2) {
+          // 狀態 2 時，平滑煞車並轉向目標
+          const camPos = new THREE.Vector3();
+          camera.getWorldPosition(camPos);
+          const dx = targetPoint.x - camPos.x;
+          const dz = targetPoint.z - camPos.z;
+          
+          const targetAngle = Math.atan2(dx, dz);
+          const camYaw = camera.rotation.y;
+          const finalTargetRotation = targetAngle + camYaw + Math.PI; 
+          
+          let diff = finalTargetRotation - pointer.rotation.z;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          
+          pointer.rotation.z += diff * 0.1; // 平滑轉向
+        }
+      }
+      renderer.render(scene, camera);
+    }
+  </script>
+</body>
+</html>
